@@ -45,11 +45,10 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--imgidx",
+        "--imgdir",
         required=True,
-        nargs="*",
-        type=int,
-        help="start and end imgs"
+        type=str,
+        help="directory of images"
     )
     parser.add_argument(
         "--gpu",
@@ -67,7 +66,7 @@ def main():
     # Set Parameters
     opt = parser.parse_args()
     seed_everything(opt.seed)
-    imgidx = opt.imgidx
+    imgdir = opt.imgdir
     gpu = opt.gpu
     resolution = 512
     batch_size = 1
@@ -95,11 +94,11 @@ def main():
     print(f"target t_enc is {t_enc} steps")
 
     # Sample
-    for s in tqdm(range(imgidx[0],imgidx[1])):
-        print(f"Now processing image {s:06}")
+    for img_file in tqdm(os.listdir(imgdir)):
+        print(f"Now processing image {img_file}")
         prompt = ["headshot photo of a person"]
         
-        img_file = f'custom_dataset/aligned_images/{s:06}.png'
+        img_file = os.path.join(imgdir, img_file)
         init_image = load_img_from_file(img_file,resolution).to(device)
         init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
         init_latent = model.get_first_stage_encoding(model.encode_first_stage(init_image))  # move to latent space
@@ -118,11 +117,12 @@ def main():
                     
         init_latent = init_latent.cpu().detach().numpy().flatten()
         c = c.cpu().detach().numpy().flatten()
-        np.save(f'../../nsdfeat/init_latent/{s:06}.npy',init_latent)
-        np.save(f'../../nsdfeat/c/{s:06}.npy',c)
+        np.save(f"../../nsdfeat/init_latent/{img_file.split('/')[-1].split('.')[0]}.npy", init_latent)
+        np.save(f"../../nsdfeat/c/{img_file.split('/')[-1].split('.')[0]}.npy", c)
 
 
 if __name__ == "__main__":
     main()
+
 
 
