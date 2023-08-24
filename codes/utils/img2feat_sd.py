@@ -8,7 +8,6 @@ from einops import repeat
 from torch import autocast
 from contextlib import nullcontext
 from pytorch_lightning import seed_everything
-from nsd_access import NSDAccess
 from PIL import Image
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
@@ -32,8 +31,8 @@ def load_model_from_config(config, ckpt, gpu, verbose=False):
     model.eval()
     return model
 
-def load_img_from_arr(img_arr,resolution):
-    image = Image.fromarray(img_arr).convert("RGB")
+def load_img_from_file(img_file,resolution):
+    image = Image.open(img_file).convert("RGB")
     w, h = resolution, resolution
     image = image.resize((w, h), resample=PIL.Image.LANCZOS)
     image = np.array(image).astype(np.float32) / 255.0
@@ -70,13 +69,12 @@ def main():
     seed_everything(opt.seed)
     imgidx = opt.imgidx
     gpu = opt.gpu
-    resolution = 320
+    resolution = 512
     batch_size = 1
     ddim_steps = 50
     ddim_eta = 0.0
     strength = 0.8
     scale = 5.0
-    nsda = NSDAccess('../../nsd/')
     config = '../diffusion_sd1/stable-diffusion/configs/stable-diffusion/v1-inference.yaml'
     ckpt = '../diffusion_sd1/stable-diffusion/models/ldm/stable-diffusion-v1/sd-v1-4.ckpt'
     config = OmegaConf.load(f"{config}")
@@ -99,13 +97,10 @@ def main():
     # Sample
     for s in tqdm(range(imgidx[0],imgidx[1])):
         print(f"Now processing image {s:06}")
-        prompt = []
-        prompts = nsda.read_image_coco_info([s],info_type='captions')
-        for p in prompts:
-            prompt.append(p['caption'])    
+        prompt = ["headshot photo of a person"]
         
-        img = nsda.read_images(s)
-        init_image = load_img_from_arr(img,resolution).to(device)
+        img_file = f'custom_dataset/aligned_images/{s:06}.png'
+        init_image = load_img_from_file(img_file,resolution).to(device)
         init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
         init_latent = model.get_first_stage_encoding(model.encode_first_stage(init_image))  # move to latent space
 
@@ -129,3 +124,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

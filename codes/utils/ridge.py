@@ -1,5 +1,6 @@
 import argparse, os
 import numpy as np
+import joblib
 from himalaya.backend import set_backend
 from himalaya.ridge import RidgeCV
 from himalaya.scoring import correlation_score
@@ -11,36 +12,32 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--target",
+        "--embeddings_dir",
         type=str,
-        default='',
-        help="Target variable",
-    )
-    parser.add_argument(
-        "--roi",
         required=True,
-        type=str,
-        nargs="*",
-        help="use roi name",
+        help="Directory containing the facial features embeddings",
     )
     parser.add_argument(
-        "--subject",
+        "--images_dir",
         type=str,
-        default=None,
-        help="subject name: subj01 or subj02  or subj05  or subj07 for full-data subjects ",
+        required=True,
+        help="Directory containing the corresponding aligned face images",
+    )
+    parser.add_argument(
+        "--model_output",
+        type=str,
+        required=True,
+        help="Path to save the trained model",
     )
 
     opt = parser.parse_args()
-    target = opt.target
-    roi = opt.roi
+    embeddings_dir = opt.embeddings_dir
+    images_dir = opt.images_dir
+    model_output = opt.model_output
 
     backend = set_backend("numpy", on_error="warn")
-    subject=opt.subject
 
-    if target == 'c' or target == 'init_latent': # CVPR
-        alpha = [0.000001,0.00001,0.0001,0.001,0.01, 0.1, 1]
-    else: # text / GAN / depth decoding (with much larger number of voxels)
-        alpha = [10000, 20000, 40000]
+    alpha = [0.000001,0.00001,0.0001,0.001,0.01, 0.1, 1]
 
     ridge = RidgeCV(alphas=alpha)
 
@@ -51,35 +48,26 @@ def main():
         preprocess_pipeline,
         ridge,
     )    
-    mridir = f'../../mrifeat/{subject}/'
-    featdir = '../../nsdfeat/subjfeat/'
-    savedir = f'../..//decoded/{subject}/'
-    os.makedirs(savedir, exist_ok=True)
 
-    X = []
-    X_te = []
-    for croi in roi:
-        if 'conv' in target: # We use averaged features for GAN due to large number of dimension of features
-            cX = np.load(f'{mridir}/{subject}_{croi}_betas_ave_tr.npy').astype("float32")
-        else:
-            cX = np.load(f'{mridir}/{subject}_{croi}_betas_tr.npy').astype("float32")
-        cX_te = np.load(f'{mridir}/{subject}_{croi}_betas_ave_te.npy').astype("float32")
-        X.append(cX)
-        X_te.append(cX_te)
-    X = np.hstack(X)
-    X_te = np.hstack(X_te)
-    
-    Y = np.load(f'{featdir}/{subject}_each_{target}_tr.npy').astype("float32").reshape([X.shape[0],-1])
-    Y_te = np.load(f'{featdir}/{subject}_ave_{target}_te.npy').astype("float32").reshape([X_te.shape[0],-1])
-    
-    print(f'Now making decoding model for... {subject}:  {roi}, {target}')
-    print(f'X {X.shape}, Y {Y.shape}, X_te {X_te.shape}, Y_te {Y_te.shape}')
+    embeddings = []
+    images = []
+    for embedding_file in os.listdir(embeddings_dir):
+        image_file = embedding_file.replace('.npy', '.png')
+        embeddings.append(np.load(os.path.join(embeddings_dir, embedding_file)).astype("float32"))
+        images.append(np.load(os.path.join(images_dir, image_file)).astype("float32").reshape([-1]))
+
+    X = np.vstack(embeddings)
+    Y = np.vstack(images)
+
+    print(f'Now making decoding model for all embeddings and images')
+    print(f'X {X.shape}, Y {Y.shape}')
     pipeline.fit(X, Y)
-    scores = pipeline.predict(X_te)
-    rs = correlation_score(Y_te.T,scores.T)
+    scores = pipeline.predict(X)
+    rs = correlation_score(Y.T,scores.T)
     print(f'Prediction accuracy is: {np.mean(rs):3.3}')
 
-    np.save(f'{savedir}/{subject}_{"_".join(roi)}_scores_{target}.npy',scores)
+    joblib.dump(pipeline, model_output)
 
 if __name__ == "__main__":
     main()
+
