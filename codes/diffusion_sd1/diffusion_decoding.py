@@ -17,6 +17,7 @@ sys.path.append("../utils/")
 from nsd_access.nsda import NSDAccess
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
+import joblib
 
 def load_model_from_config(config, ckpt, gpu, verbose=False):
     print(f"Loading model from {ckpt}")
@@ -50,12 +51,6 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--imgidx",
-        required=True,
-        type=int,
-        help="img idx"
-    )
-    parser.add_argument(
         "--gpu",
         required=True,
         type=int,
@@ -68,49 +63,26 @@ def main():
         help="the seed (for reproducible sampling)",
     )
     parser.add_argument(
-        "--subject",
+        "--embedding_path",
         required=True,
         type=str,
-        default=None,
-        help="subject name: subj01 or subj02  or subj05  or subj07 for full-data subjects ",
+        help="Path to the embeddings",
     )
     parser.add_argument(
-        "--method",
+        "--model_path",
         required=True,
         type=str,
-        help="cvpr or text or gan",
+        help="Path to the trained model",
     )
 
     # Set parameters
     opt = parser.parse_args()
     seed_everything(opt.seed)
-    imgidx = opt.imgidx
     gpu = opt.gpu
-    method = opt.method
-    subject=opt.subject
-    gandir = f'../../decoded/gan_recon_img/all_layers/{subject}/streams/'
-    captdir = f'../../decoded/{subject}/captions/'
+    embedding_path = opt.embedding_path
+    model_path = opt.model_path
 
-    # Load NSD information
-    nsd_expdesign = scipy.io.loadmat('../../nsd/nsddata/experiments/nsd/nsd_expdesign.mat')
-
-    # Note that mos of them are 1-base index!
-    # This is why I subtract 1
-    sharedix = nsd_expdesign['sharedix'] -1 
-
-    nsda = NSDAccess('../../nsd/')
-    sf = h5py.File(nsda.stimuli_file, 'r')
-    sdataset = sf.get('imgBrick')
-
-    stims_ave = np.load(f'../../mrifeat/{subject}/{subject}_stims_ave.npy')
-
-
-    tr_idx = np.zeros_like(stims_ave)
-    for idx, s in enumerate(stims_ave):
-        if s in sharedix:
-            tr_idx[idx] = 0
-        else:
-            tr_idx[idx] = 1
+    
 
     # Load Stable Diffusion Model
     config = './stable-diffusion/configs/stable-diffusion/v1-inference.yaml'
@@ -130,7 +102,7 @@ def main():
     batch_size = n_samples
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-    outdir = f'../../decoded/image-{method}/{subject}/'
+    outdir = f'../../decoded/image-cvpr/'
     os.makedirs(outdir, exist_ok=True)
 
     sample_path = os.path.join(outdir, f"samples")
@@ -146,48 +118,28 @@ def main():
     t_enc = int(strength * ddim_steps)
     print(f"target t_enc is {t_enc} steps")
 
+    # Load trained model
+    trained_model = joblib.load(model_path)
+
+    # Load embeddings
+    embeddings = np.load(embedding_path)
+
+    # Predict latent from embeddings
+    predicted_latent = trained_model.predict(embeddings)
+
     # Load z (Image)
-    imgidx_te = np.where(tr_idx==0)[0][imgidx] # Extract test image index
-    idx73k= stims_ave[imgidx_te]
-    Image.fromarray(np.squeeze(sdataset[idx73k,:,:,:]).astype(np.uint8)).save(
-        os.path.join(sample_path, f"{imgidx:05}_org.png"))    
-    
-    if method in ['cvpr','text']:
-        roi_latent = 'early'
-        scores_latent = np.load(f'../../decoded/{subject}/{subject}_{roi_latent}_scores_init_latent.npy')
-        imgarr = torch.Tensor(scores_latent[imgidx,:].reshape(4,40,40)).unsqueeze(0).to('cuda')
-
-        # Generate image from Z
-        precision_scope = autocast if precision == "autocast" else nullcontext
-        with torch.no_grad():
-            with precision_scope("cuda"):
-                with model.ema_scope():
-                    x_samples = model.decode_first_stage(imgarr)
-                    x_samples = torch.clamp((x_samples + 1.0) / 2.0, min=0.0, max=1.0)
-
-                    for x_sample in x_samples:
-                        x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-        im = Image.fromarray(x_sample.astype(np.uint8)).resize((512,512))
-        im = np.array(im)
-
-    elif method == 'gan':
-        ganpath = f'{gandir}/recon_image_normalized-VGG19-fc8-{subject}-streams-{imgidx:06}.tiff'
-        im = Image.open(ganpath).resize((512,512))
-        im = np.array(im)
-
-    init_image = load_img_from_arr(im).to('cuda')
-    init_latent = model.get_first_stage_encoding(model.encode_first_stage(init_image))  # move to latent space
+    # We use unsqueeze(0) to add an extra dimension to the tensor, 
+    # making it a batch of size 1, as the model expects input in batches.
+    imgarr = torch.Tensor(predicted_latent).unsqueeze(0).to('cuda')
 
     # Load c (Semantics)
-    if method == 'cvpr':
-        roi_c = 'ventral'
-        scores_c = np.load(f'../../decoded/{subject}/{subject}_{roi_c}_scores_c.npy')
-        carr = scores_c[imgidx,:].reshape(77,768)
-        c = torch.Tensor(carr).unsqueeze(0).to('cuda')
-    elif method in ['text','gan']:
-        captions = pd.read_csv(f'{captdir}/captions_brain.csv', sep='\t',header=None)
-        c = model.get_learned_conditioning(captions.iloc[imgidx][0]).to('cuda')
-
+    prompt = ["headshot photo of a person"]
+    with torch.no_grad():
+        with precision_scope("cuda"):
+            with model.ema_scope():
+                uc = model.get_learned_conditioning(batch_size * [""])
+                c = model.get_learned_conditioning(prompt).mean(axis=0).unsqueeze(0)
+    
     # Generate image from Z (image) + C (semantics)
     base_count = 0
     with torch.no_grad():
@@ -195,9 +147,8 @@ def main():
             with model.ema_scope():
                 for n in trange(n_iter, desc="Sampling"):
                     uc = model.get_learned_conditioning(batch_size * [""])
-
                     # encode (scaled latent)
-                    z_enc = sampler.stochastic_encode(init_latent, torch.tensor([t_enc]*batch_size).to(device))
+                    z_enc = sampler.stochastic_encode(imgarr, torch.tensor([t_enc]*batch_size).to(device))
                     # decode it
                     samples = sampler.decode(z_enc, c, t_enc, unconditional_guidance_scale=scale,
                                             unconditional_conditioning=uc,)
@@ -208,9 +159,12 @@ def main():
                     for x_sample in x_samples:
                         x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
                     Image.fromarray(x_sample.astype(np.uint8)).save(
-                        os.path.join(sample_path, f"{imgidx:05}_{base_count:03}.png"))    
+                        os.path.join(sample_path, f"{embedding_path.split('/')[-1].split('.')[0]}_{base_count:03}.png"))    
                     base_count += 1
+
 
 
 if __name__ == "__main__":
     main()
+
+
